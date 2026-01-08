@@ -26,24 +26,35 @@ load_dotenv()
 # ========================================
 # 【配置区域】- 从 .env 文件读取
 # ========================================
+def get_required_env(key: str, error_msg: str = None) -> str:
+    """获取必需的环境变量，如果未配置则退出程序"""
+    value = os.getenv(key)
+    if not value:
+        msg = error_msg or f"❌ 错误：未在 .env 文件中配置 {key}"
+        print(msg)
+        print(f"请在 .env 文件中设置 {key}，参考 .env.example 文件")
+        raise SystemExit(1)
+    return value
+
 # GitHub 仓库配置
-DEFAULT_REPO_URL = os.getenv('DEFAULT_REPO_URL', 'git@github.com:your-username/your-repo.git')
-GITHUB_USERNAME = os.getenv('GITHUB_USERNAME', 'ghcpd')
-GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
+DEFAULT_REPO_URL = get_required_env('DEFAULT_REPO_URL', "❌ 错误：未在 .env 文件中配置 DEFAULT_REPO_URL（GitHub仓库URL）")
+GITHUB_USERNAME = get_required_env('GITHUB_USERNAME', "❌ 错误：未在 .env 文件中配置 GITHUB_USERNAME（GitHub用户名）")
+GITHUB_TOKEN = get_required_env('GITHUB_TOKEN', "❌ 错误：未在 .env 文件中配置 GITHUB_TOKEN（GitHub访问令牌）")
 
 # 模板文件夹名称
-MAIN_FOLDER_NAME = os.getenv('MAIN_FOLDER_NAME', 'main')
+MAIN_FOLDER_NAME = get_required_env('MAIN_FOLDER_NAME', "❌ 错误：未在 .env 文件中配置 MAIN_FOLDER_NAME（模板文件夹名称）")
 
 # 要创建的自定义文件夹名称列表（也会作为分支名和PR标题）
-_custom_folders_str = os.getenv('CUSTOM_FOLDERS', 'oswe-mini-m23a1s255-new,oswe-mini-secondary,oswe-mini-m23a3s430,Claude-haiku-4.5,oswe-mini-prime-new,grok-fast')
+_custom_folders_str = get_required_env('CUSTOM_FOLDERS', "❌ 错误：未在 .env 文件中配置 CUSTOM_FOLDERS（自定义文件夹列表）")
 CUSTOM_FOLDERS = [f.strip() for f in _custom_folders_str.split(',') if f.strip()]
 
-# 排除的文件/文件夹名称
-_exclude_names_str = os.getenv('EXCLUDE_NAMES', '.git,__pycache__,.DS_Store')
-EXCLUDE_NAMES = {n.strip() for n in _exclude_names_str.split(',') if n.strip()}
+# 排除的文件/文件夹名称（可选，如果未配置则上传所有文件）
+_exclude_names_str = os.getenv('EXCLUDE_NAMES', '')
+EXCLUDE_NAMES = {n.strip() for n in _exclude_names_str.split(',') if n.strip()} if _exclude_names_str else set()
 
-# PR 描述文件名
-PR_DESCRIPTION_FILE = os.getenv('PR_DESCRIPTION_FILE', 'final_prompt.txt')
+# PR 描述配置（两个二选一：从文件读取或直接配置内容）
+PR_DESCRIPTION_FILE = os.getenv('PR_DESCRIPTION_FILE')  # PR描述文件名（可选）
+PR_DESCRIPTION = os.getenv('PR_DESCRIPTION')  # PR描述内容（可选）
 # ========================================
 
 
@@ -192,7 +203,7 @@ def copy_folder_to_repo_root(src_folder: Path, repo_dir: Path) -> None:
     gitignore_spec = None
     
     # 检查 EXCLUDE_NAMES 是否为空
-    use_exclude_names = bool(EXCLUDE_NAMES) if 'EXCLUDE_NAMES' in globals() else False
+    use_exclude_names = bool(EXCLUDE_NAMES)
     
     if gitignore_file.exists() and gitignore_file.is_file():
         try:
@@ -200,10 +211,11 @@ def copy_folder_to_repo_root(src_folder: Path, repo_dir: Path) -> None:
                 gitignore_spec = pathspec.PathSpec.from_lines('gitwildmatch', f)
             print(f"    ⓘ 使用 .gitignore 规则过滤文件")
         except Exception as e:
-            print(f"    ⚠️ 读取 .gitignore 失败，使用默认规则: {e}")
+            print(f"    ⚠️ 读取 .gitignore 失败: {e}")
             gitignore_spec = None
-    elif not use_exclude_names:
-        print(f"    ⚠️ EXCLUDE_NAMES 未定义或为空，将上传所有文件（仅排除 .git 文件）")
+    
+    if not use_exclude_names and not gitignore_spec:
+        print(f"    ⓘ 未配置 EXCLUDE_NAMES 且无 .gitignore，将上传所有文件（仅排除 .git 文件夹）")
     
     # Copy src folder contents into repo root
     for root, dirs, files in os.walk(src_folder):
@@ -247,16 +259,21 @@ def copy_folder_to_repo_root(src_folder: Path, repo_dir: Path) -> None:
 
 
 def get_pr_description(folder: Path) -> str:
-    """从文件夹中读取PR描述"""
-    desc_file = folder / PR_DESCRIPTION_FILE
-    if desc_file.exists() and desc_file.is_file():
-        try:
-            with open(desc_file, 'r', encoding='utf-8') as f:
-                content = f.read().strip()
-            if content:
-                return content
-        except Exception as e:
-            print(f"    ⚠️ 读取 {PR_DESCRIPTION_FILE} 失败: {e}")
+    """从文件夹中读取PR描述或使用环境变量配置的内容"""
+    # 如果配置了 PR_DESCRIPTION_FILE，优先从文件读取
+    if PR_DESCRIPTION_FILE:
+        desc_file = folder / PR_DESCRIPTION_FILE
+        if desc_file.exists() and desc_file.is_file():
+            try:
+                with open(desc_file, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                if content:
+                    return content
+            except Exception as e:
+                print(f"    ⚠️ 读取 {PR_DESCRIPTION_FILE} 失败: {e}")
+    # 如果没有配置 PR_DESCRIPTION_FILE，使用 PR_DESCRIPTION 环境变量
+    elif PR_DESCRIPTION:
+        return PR_DESCRIPTION
     
     # 默认描述
     return f"Auto-generated PR for branch: {folder.name}"
@@ -406,13 +423,14 @@ def cmd_push(args):
                     print()
                     continue
                 
-                # 检查是否存在 final_prompt.txt
-                desc_file = folder / PR_DESCRIPTION_FILE
-                if not desc_file.exists() or not desc_file.is_file():
-                    print(f"    ⚠️ 未找到 {PR_DESCRIPTION_FILE}，跳过该文件夹")
-                    print(f"    ⊙ 请在 {folder} 中创建 {PR_DESCRIPTION_FILE} 文件")
-                    print()
-                    continue
+                # 检查 PR 描述配置：如果配置了 PR_DESCRIPTION_FILE，必须找到该文件
+                if PR_DESCRIPTION_FILE:
+                    desc_file = folder / PR_DESCRIPTION_FILE
+                    if not desc_file.exists() or not desc_file.is_file():
+                        print(f"    ⚠️ 未找到 {PR_DESCRIPTION_FILE}，跳过该文件夹")
+                        print(f"    ⊙ 请在 {folder} 中创建 {PR_DESCRIPTION_FILE} 文件")
+                        print()
+                        continue
 
             # 创建分支
             if is_main:
@@ -457,32 +475,22 @@ def cmd_push(args):
 
             # 创建 Pull Request（main 文件夹不创建 PR）
             if args.create_pr and not is_main:
-                if not GITHUB_TOKEN:
-                    print(f"    ⚠️ 未设置 GITHUB_TOKEN，跳过 PR 创建")
-                else:
-                    # 使用文件夹名作为 PR 标题
-                    pr_title = branch
-                    # 从 final_prompt.txt 读取 PR 描述
-                    pr_body = get_pr_description(folder)
+                # 使用文件夹名作为 PR 标题
+                pr_title = branch
+                # 从 PR 描述文件读取 PR 描述
+                pr_body = get_pr_description(folder)
                     
-                    # 等待一小段时间，确保分支已经推送成功
-                    time.sleep(1)
-                    
-                    create_pull_request(
-                        repo_url=args.repo_url,
-                        branch_name=branch,
-                        pr_title=pr_title,
-                        pr_body=pr_body,
-                        username=GITHUB_USERNAME,
-                        token=GITHUB_TOKEN
-                    )
-            elif is_main:
-                print(f"    ⊙ main 分支作为默认分支，不创建 PR")
-
-            print()  # 空行分隔
-
-    print("All done.")
-
+                # 等待一小段时间，确保分支已经推送成功
+                time.sleep(1)
+                
+                create_pull_request(
+                    repo_url=args.repo_url,
+                    branch_name=branch,
+                    pr_title=pr_title,
+                    pr_body=pr_body,
+                    username=GITHUB_USERNAME,
+                    token=GITHUB_TOKEN
+                )
 
 # ========================================
 # Push-PR 命令：推送分支并创建PR
