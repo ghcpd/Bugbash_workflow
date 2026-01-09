@@ -182,6 +182,65 @@ def run(cmd: list[str], cwd: Path) -> None:
         raise
 
 
+def check_remote_branch_status(tmp_dir: Path, branch_name: str) -> tuple[bool, bool, bool]:
+    """检查远程分支状态
+    
+    Returns:
+        (exists, is_same, needs_force): 
+        - exists: 远程分支是否存在
+        - is_same: 内容是否完全相同
+        - needs_force: 是否需要强制推送（分支分叉）
+    """
+    try:
+        # 检查远程分支是否存在
+        result = subprocess.run(
+            ["git", "ls-remote", "--heads", "origin", branch_name],
+            cwd=str(tmp_dir),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        if not result.stdout.strip():
+            # 远程分支不存在
+            return False, False, False
+        
+        # 远程分支存在，比较文件树内容而不是 commit hash
+        # 获取本地树的 hash
+        local_tree_result = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=str(tmp_dir),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        local_tree_hash = local_tree_result.stdout.strip()
+        
+        # 获取远程分支的树 hash
+        remote_tree_result = subprocess.run(
+            ["git", "rev-parse", f"origin/{branch_name}^{{tree}}"],
+            cwd=str(tmp_dir),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        remote_tree_hash = remote_tree_result.stdout.strip()
+        
+        # 如果树 hash 相同，说明内容完全一致（即使 commit hash 不同）
+        if local_tree_hash == remote_tree_hash:
+            return True, True, False
+        
+        # 内容不同，总是需要强制推送（因为我们使用孤儿分支或重新创建的 commit）
+        return True, False, True
+        
+    except subprocess.CalledProcessError:
+        # 无法检查，假设需要推送
+        return False, False, False
+
+
 def copy_folder_to_repo_root(src_folder: Path, repo_dir: Path) -> None:
     """复制文件夹内容到仓库根目录（上传所有文件）
     
@@ -462,14 +521,37 @@ def cmd_push(args):
                 # main 分支使用孤儿分支（作为基础）
                 run(["git", "checkout", "--orphan", branch], tmp_dir)
             else:
-                # 其他分支基于远程 main 分支创建（这样可以创建PR）
+                # 检查远程分支是否存在
+                remote_branch_exists = False
                 try:
-                    # 尝试从远程 main 分支创建新分支
-                    run(["git", "checkout", "-b", branch, f"origin/{args.main_name}"], tmp_dir)
+                    result = subprocess.run(
+                        ["git", "ls-remote", "--heads", "origin", branch],
+                        cwd=str(tmp_dir),
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    remote_branch_exists = bool(result.stdout.strip())
                 except subprocess.CalledProcessError:
-                    # 如果远程 main 不存在，使用孤儿分支
-                    print(f"    ⓘ 远程 {args.main_name} 分支不存在，使用孤儿分支")
-                    run(["git", "checkout", "--orphan", branch], tmp_dir)
+                    pass
+                
+                if remote_branch_exists:
+                    # 远程分支存在，基于远程分支创建本地分支
+                    try:
+                        run(["git", "checkout", "-b", branch, f"origin/{branch}"], tmp_dir)
+                    except subprocess.CalledProcessError:
+                        # 如果失败，使用孤儿分支
+                        print(f"    ⓘ 无法基于远程 {branch} 创建分支，使用孤儿分支")
+                        run(["git", "checkout", "--orphan", branch], tmp_dir)
+                else:
+                    # 远程分支不存在，基于远程 main 分支创建
+                    try:
+                        run(["git", "checkout", "-b", branch, f"origin/{args.main_name}"], tmp_dir)
+                    except subprocess.CalledProcessError:
+                        # 如果远程 main 不存在，使用孤儿分支
+                        print(f"    ⓘ 远程 {args.main_name} 分支不存在，使用孤儿分支")
+                        run(["git", "checkout", "--orphan", branch], tmp_dir)
 
             # Clear index (in case)
             run(["git", "rm", "-rf", "--ignore-unmatch", "."], tmp_dir)
@@ -487,16 +569,74 @@ def cmd_push(args):
             # Commit (if no changes, commit will fail; handle by skipping)
             # main文件夹使用特殊的commit信息
             commit_msg = "input data" if is_main else branch
-            try:
-                run(["git", "commit", "-m", commit_msg], tmp_dir)
-            except subprocess.CalledProcessError:
-                print(f"    ⊙ Skip commit (no changes) for branch: {branch}")
+            commit_result = subprocess.run(
+                ["git", "commit", "-m", commit_msg],
+                cwd=str(tmp_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
+            if commit_result.returncode != 0:
+                # Commit 失败，说明没有变化
+                print(f"    ⊙ 内容与远程一致，跳过推送: {branch}")
+                # 即使跳过推送，如果需要创建PR，仍然尝试创建
+                if args.create_pr and not is_main:
+                    pr_title = branch
+                    pr_body = get_pr_description(folder)
+                    time.sleep(1)
+                    create_pull_request(
+                        repo_url=args.repo_url,
+                        branch_name=branch,
+                        pr_title=pr_title,
+                        pr_body=pr_body,
+                        username=GITHUB_USERNAME,
+                        token=GITHUB_TOKEN
+                    )
+                continue
 
+            # 检查远程分支状态（已提交但未推送）
+            remote_exists, is_same, needs_force = check_remote_branch_status(tmp_dir, branch)
+            
+            if remote_exists and is_same:
+                # 远程分支存在且内容完全一致，跳过推送
+                print(f"    ⊙ 内容与远程一致，跳过推送: {branch}")
+                # 即使跳过推送，如果需要创建PR，仍然尝试创建
+                if args.create_pr and not is_main:
+                    pr_title = branch
+                    pr_body = get_pr_description(folder)
+                    time.sleep(1)
+                    create_pull_request(
+                        repo_url=args.repo_url,
+                        branch_name=branch,
+                        pr_title=pr_title,
+                        pr_body=pr_body,
+                        username=GITHUB_USERNAME,
+                        token=GITHUB_TOKEN
+                    )
+                continue
+
+            # 推送分支（先尝试普通推送，失败则根据 --force 参数决定）
             push_cmd = ["git", "push", "-u", "origin", branch]
-            if args.force:
-                push_cmd.insert(2, "--force")
-            run(push_cmd, tmp_dir)
-            print(f"    ✓ Pushed branch: {branch}")
+            
+            try:
+                run(push_cmd, tmp_dir)
+                print(f"    ✓ Pushed branch: {branch}")
+            except subprocess.CalledProcessError:
+                # 普通推送失败，检查是否提供了 --force
+                if args.force:
+                    # 有 --force，强制推送
+                    push_cmd.insert(2, "--force")
+                    try:
+                        run(push_cmd, tmp_dir)
+                        print(f"    ✓ Pushed branch: {branch} (force)")
+                    except subprocess.CalledProcessError:
+                        print(f"    ⚠️ 推送失败: {branch}")
+                        continue
+                else:
+                    # 没有 --force，提示用户
+                    print(f"    ⚠️ 远程分支 {branch} 已存在且无法 fast-forward")
+                    print(f"    ⊙ 如需覆盖，请使用: python Bugbash_workflow.py push-pr --force")
+                    continue
 
             # 创建 Pull Request（main 文件夹不创建 PR）
             if args.create_pr and not is_main:
