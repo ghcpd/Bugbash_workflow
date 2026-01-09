@@ -1,5 +1,16 @@
 # Bugbash 工作流脚本使用说明
 
+## 🔄 更新说明
+
+**2026-01-09：补推功能优化**
+- 使用 `--folders` 指定文件夹时，只推送指定的文件夹，不会自动推送 main
+- 新增远程 main 分支检查：使用 `--folders` 推送时，会检查远程 main 是否存在
+- 如果远程 main 不存在，将提示用户先完整推送（包含 main）
+- 适用场景：某个文件夹推送失败需要补推，避免重复推送 main 导致冲突
+- 示例：`python Bugbash_workflow.py push-pr --folders folder1`
+
+---
+
 ## 前置准备
 
 ### 1. 环境要求
@@ -103,6 +114,20 @@ python Bugbash_workflow.py push-pr --folders folder1 folder2 # 指定文件夹
 - ⚠️ 如果配置了 `PR_DESCRIPTION_FILE`，每个文件夹必须有该文件，否则会被跳过
 - ⚠️ 自定义文件夹缺少 `<文件夹名>.txt` 会被跳过
 - ⚠️ `--force` 会覆盖远程分支，谨慎使用
-- ✅ 建议首次推送顺序：先推 main，再推其他分支
+- ⚠️ **使用 `--folders` 补推时，必须确保远程 main 分支已存在**
+- ✅ 建议首次推送顺序：先完整推送（包含 main），之后可单独补推某个文件夹
 - ✅ PR 已存在不会报错，会自动跳过
 - ✅ 单个文件夹失败不影响其他文件夹继续执行
+
+### 补推工作流示例
+
+```bash
+# 1. 首次完整推送（推送 main + 所有自定义文件夹）
+python Bugbash_workflow.py push-pr
+
+# 2. 如果某个文件夹失败，单独补推（前提：远程 main 已存在）
+python Bugbash_workflow.py push-pr --folders folder1
+
+# 3. 如果需要强制覆盖
+python Bugbash_workflow.py push-pr --folders folder1 --force
+```

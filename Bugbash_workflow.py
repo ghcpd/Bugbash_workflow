@@ -369,17 +369,19 @@ def cmd_push(args):
     root = Path.cwd()
 
     if args.folders:
+        # 用户明确指定了文件夹，只推送指定的文件夹
         folders = [root / f for f in args.folders]
     else:
+        # 自动检测所有文件夹（不包括 main）
         folders = autodetect_targets(root, args.main_name)
+        
+        # 只有在自动检测模式下，才检查并添加 main 文件夹
+        main_folder = root / args.main_name
+        if main_folder.is_dir():
+            # 将 main 文件夹添加到列表开头，优先推送
+            folders.insert(0, main_folder)
 
     folders = [f for f in folders if f.is_dir()]
-    
-    # 检查是否存在 main 文件夹，如果存在则添加到推送列表
-    main_folder = root / args.main_name
-    if main_folder.is_dir():
-        # 将 main 文件夹添加到列表开头，优先推送
-        folders.insert(0, main_folder)
     
     if not folders:
         raise SystemExit("No folders to push.")
@@ -402,6 +404,29 @@ def cmd_push(args):
         except subprocess.CalledProcessError:
             # If repo is empty or auth issues, git may fail; still allow pushing new branches if auth ok.
             pass
+        
+        # 检查是否有非 main 文件夹需要推送
+        has_non_main = any(f.name != args.main_name for f in folders)
+        if has_non_main:
+            # 检查远程 main 分支是否存在
+            try:
+                result = subprocess.run(
+                    ["git", "ls-remote", "--heads", "origin", args.main_name],
+                    cwd=str(tmp_dir),
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                if not result.stdout.strip():
+                    # 远程 main 分支不存在
+                    print(f"❌ 错误：远程 {args.main_name} 分支不存在")
+                    print(f"⊙ 请先推送 {args.main_name} 文件夹作为基础分支：")
+                    print(f"   python Bugbash_workflow.py push-pr")
+                    raise SystemExit(1)
+            except subprocess.CalledProcessError as e:
+                print(f"⚠️ 无法检查远程分支状态: {e}")
+                print(f"⊙ 继续执行，但如果远程 {args.main_name} 不存在可能会失败")
 
         for folder in folders:
             branch = folder.name
