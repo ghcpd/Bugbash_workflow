@@ -466,6 +466,9 @@ def cmd_push(args):
         
         # 检查是否有非 main 文件夹需要推送
         has_non_main = any(f.name != args.main_name for f in folders)
+        has_main = any(f.name == args.main_name for f in folders)
+        
+        # 如果有非 main 文件夹需要推送，需要确保 main 分支存在
         if has_non_main:
             # 检查远程 main 分支是否存在
             try:
@@ -477,15 +480,27 @@ def cmd_push(args):
                     stderr=subprocess.PIPE,
                     text=True
                 )
-                if not result.stdout.strip():
-                    # 远程 main 分支不存在
-                    print(f"❌ 错误：远程 {args.main_name} 分支不存在")
-                    print(f"⊙ 请先推送 {args.main_name} 文件夹作为基础分支：")
-                    print(f"   python Bugbash_workflow.py push-pr")
-                    raise SystemExit(1)
+                remote_main_exists = bool(result.stdout.strip())
+                
+                if not remote_main_exists:
+                    # 远程 main 不存在
+                    if has_main:
+                        # main 在待推送列表中，会被推送，继续执行
+                        print(f"ⓘ 远程 {args.main_name} 分支不存在，将首先推送 {args.main_name}")
+                    else:
+                        # main 不在待推送列表中，报错
+                        print(f"❌ 错误：远程 {args.main_name} 分支不存在")
+                        print(f"⊙ 请先推送 {args.main_name} 文件夹作为基础分支：")
+                        print(f"   python Bugbash_workflow.py push-pr")
+                        raise SystemExit(1)
+                else:
+                    # 远程 main 存在，如果本地也有 main，检查是否需要更新
+                    if has_main:
+                        print(f"ⓘ 远程 {args.main_name} 分支已存在，将检查是否需要更新")
             except subprocess.CalledProcessError as e:
                 print(f"⚠️ 无法检查远程分支状态: {e}")
-                print(f"⊙ 继续执行，但如果远程 {args.main_name} 不存在可能会失败")
+                if not has_main:
+                    print(f"⊙ 继续执行，但如果远程 {args.main_name} 不存在可能会失败")
 
         for folder in folders:
             branch = folder.name
