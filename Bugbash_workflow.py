@@ -248,30 +248,35 @@ def copy_folder_to_repo_root(src_folder: Path, repo_dir: Path) -> None:
         src_folder: 源文件夹路径
         repo_dir: 目标仓库目录
     """
-    # Remove everything except .git
-    for item in repo_dir.iterdir():
-        if item.name == ".git":
-            continue
-        if item.is_dir():
-            shutil.rmtree(item)
-        else:
-            item.unlink()
+    # 清理仓库目录中“未跟踪”的文件/目录，但保留所有已跟踪文件
+    # 这样可以保留仓库里重要的 tracked 文件（如 .github/workflows 等），同时避免脏的 untracked 残留。
+    clean_result = subprocess.run(
+        ["git", "clean", "-fd"],
+        cwd=str(repo_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if clean_result.returncode != 0:
+        print("    ⚠️ git clean -fd 失败，未清理未跟踪文件，将继续复制")
 
     # 检查是否存在 .gitignore 文件
-    gitignore_file = src_folder / ".gitignore"
+    gitignore_files = [src_folder / ".gitignore", repo_dir / ".gitignore"]
     gitignore_spec = None
     
     # 检查 EXCLUDE_NAMES 是否为空
     use_exclude_names = bool(EXCLUDE_NAMES)
-    
-    if gitignore_file.exists() and gitignore_file.is_file():
-        try:
-            with open(gitignore_file, 'r', encoding='utf-8') as f:
-                gitignore_spec = pathspec.PathSpec.from_lines('gitwildmatch', f)
-            print(f"    ⓘ 使用 .gitignore 规则过滤文件")
-        except Exception as e:
-            print(f"    ⚠️ 读取 .gitignore 失败: {e}")
-            gitignore_spec = None
+    for gitignore_file in gitignore_files:
+        if gitignore_file.exists() and gitignore_file.is_file():
+            try:
+                with open(gitignore_file, 'r', encoding='utf-8') as f:
+                    gitignore_spec = pathspec.PathSpec.from_lines('gitwildmatch', f)
+                print(f"    ⓘ 使用 .gitignore 规则过滤文件")
+                # 读取到第一个有效的 .gitignore 后停止, 优先使用 src_folder 下的
+                break
+            except Exception as e:
+                print(f"    ⚠️ 读取 .gitignore 失败: {e}")
+                gitignore_spec = None
     
     if not use_exclude_names and not gitignore_spec:
         print(f"    ⓘ 未配置 EXCLUDE_NAMES 且无 .gitignore，将上传所有文件（仅排除 .git 文件夹）")
@@ -458,11 +463,16 @@ def cmd_push(args):
         run(["git", "init"], tmp_dir)
         run(["git", "remote", "add", "origin", args.repo_url], tmp_dir)
         # Fetch remote refs (so push can set upstream cleanly)
-        try:
-            run(["git", "fetch", "origin", "--prune"], tmp_dir)
-        except subprocess.CalledProcessError:
+        fetch_result = subprocess.run(
+            ["git", "fetch", "origin", "--prune"],
+            cwd=str(tmp_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if fetch_result.returncode != 0:
             # If repo is empty or auth issues, git may fail; still allow pushing new branches if auth ok.
-            pass
+            print("⚠️ git fetch 失败（仓库可能为空或鉴权问题），将继续尝试推送分支")
         
         # 检查是否有非 main 文件夹需要推送
         has_non_main = any(f.name != args.main_name for f in folders)
@@ -531,34 +541,39 @@ def cmd_push(args):
                         print()
                         continue
 
+            # 检查远程分支是否存在
+            remote_branch_exists = False
+            try:
+                result = subprocess.run(
+                    ["git", "ls-remote", "--heads", "origin", branch],
+                    cwd=str(tmp_dir),
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                remote_branch_exists = bool(result.stdout.strip())
+            except subprocess.CalledProcessError:
+                pass
+            
             # 创建分支
-            if is_main:
-                # main 分支使用孤儿分支（作为基础）
-                run(["git", "checkout", "--orphan", branch], tmp_dir)
-            else:
-                # 检查远程分支是否存在
-                remote_branch_exists = False
-                try:
-                    result = subprocess.run(
-                        ["git", "ls-remote", "--heads", "origin", branch],
-                        cwd=str(tmp_dir),
-                        check=True,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True
-                    )
-                    remote_branch_exists = bool(result.stdout.strip())
-                except subprocess.CalledProcessError:
-                    pass
                 
-                if remote_branch_exists:
-                    # 远程分支存在，基于远程分支创建本地分支
+            if remote_branch_exists:
+                # 远程分支存在，基于远程分支创建本地分支
+                if is_main:
+                    run(["git", "checkout", branch], tmp_dir)
+                else:
                     try:
                         run(["git", "checkout", "-b", branch, f"origin/{branch}"], tmp_dir)
                     except subprocess.CalledProcessError:
                         # 如果失败，使用孤儿分支
                         print(f"    ⓘ 无法基于远程 {branch} 创建分支，使用孤儿分支")
                         run(["git", "checkout", "--orphan", branch], tmp_dir)
+            else:
+                if is_main:
+                    # main 分支不存在，使用孤儿分支
+                    print(f"    ⓘ 远程 {args.main_name} 分支不存在，使用孤儿分支")
+                    run(["git", "checkout", "--orphan", branch], tmp_dir)
                 else:
                     # 远程分支不存在，基于远程 main 分支创建
                     try:
@@ -569,7 +584,7 @@ def cmd_push(args):
                         run(["git", "checkout", "--orphan", branch], tmp_dir)
 
             # Clear index (in case)
-            run(["git", "rm", "-rf", "--ignore-unmatch", "."], tmp_dir)
+            # run(["git", "rm", "-rf", "--ignore-unmatch", "."], tmp_dir)
 
             # 上传文件夹内的所有文件
             copy_folder_to_repo_root(folder, tmp_dir)
