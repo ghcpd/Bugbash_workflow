@@ -15,13 +15,12 @@ import subprocess
 import tempfile
 import requests
 from pathlib import Path
-from typing import Optional
 from dotenv import load_dotenv
 import time
 import pathspec
 
 # 加载 .env 文件
-load_dotenv()
+load_dotenv(dotenv_path=Path.cwd() / '.env')
 
 # ========================================
 # 【配置区域】- 从 .env 文件读取
@@ -271,7 +270,7 @@ def copy_folder_to_repo_root(src_folder: Path, repo_dir: Path) -> None:
             try:
                 with open(gitignore_file, 'r', encoding='utf-8') as f:
                     gitignore_spec = pathspec.PathSpec.from_lines('gitwildmatch', f)
-                print(f"    ⓘ 使用 .gitignore 规则过滤文件")
+                print("    ⓘ 使用 .gitignore 规则过滤文件")
                 # 读取到第一个有效的 .gitignore 后停止, 优先使用 src_folder 下的
                 break
             except Exception as e:
@@ -279,7 +278,7 @@ def copy_folder_to_repo_root(src_folder: Path, repo_dir: Path) -> None:
                 gitignore_spec = None
     
     if not use_exclude_names and not gitignore_spec:
-        print(f"    ⓘ 未配置 EXCLUDE_NAMES 且无 .gitignore，将上传所有文件（仅排除 .git 文件夹）")
+        print("    ⓘ 未配置 EXCLUDE_NAMES 且无 .gitignore，将上传所有文件（仅排除 .git 文件夹）")
     
     # Copy src folder contents into repo root
     for root, dirs, files in os.walk(src_folder):
@@ -416,7 +415,7 @@ def create_pull_request(repo_url: str, branch_name: str, pr_title: str,
             if error_msg and 'message' in error_msg[0]:
                 msg = error_msg[0]['message']
                 if 'pull request already exists' in msg.lower() or 'A pull request already exists' in msg:
-                    print(f"    ⊙ PR 已存在")
+                    print("    ⊙ PR 已存在")
                     return True
             print(f"    ⚠️ 创建 PR 失败: {response.status_code}, {response.text}")
             return False
@@ -446,6 +445,63 @@ def cmd_push(args):
             folders.insert(0, main_folder)
 
     folders = [f for f in folders if f.is_dir()]
+
+    # 推送前预检查：避免进入 git 流程后才发现缺少必需文件
+    valid_folders: list[Path] = []
+    for folder in folders:
+        is_main = (folder.name == args.main_name)
+        if is_main:
+            valid_folders.append(folder)
+            continue
+
+        # 检查是否存在与文件夹同名的 txt 文件
+        folder_txt_file = folder / f"{folder.name}.txt"
+        if not folder_txt_file.exists() or not folder_txt_file.is_file():
+            print(f"    ⚠️ 未找到 {folder.name}.txt，跳过该文件夹")
+            print(f"    ⊙ 请在 {folder} 中创建 {folder.name}.txt 文件")
+            print()
+            continue
+
+        # 检查 txt 文件是否为空（仅空白也视为无效）
+        try:
+            txt_content = folder_txt_file.read_text(encoding="utf-8").strip()
+        except Exception as e:
+            print(f"    ⚠️ 读取 {folder.name}.txt 失败，跳过该文件夹")
+            print(f"    ⊙ 错误: {e}")
+            print()
+            continue
+        if not txt_content:
+            print(f"    ⚠️ {folder.name}.txt 内容为空，跳过该文件夹")
+            print(f"    ⊙ 请在 {folder_txt_file} 中填写内容")
+            print()
+            continue
+
+        # 若配置了 PR_DESCRIPTION_FILE，则必须存在
+        if PR_DESCRIPTION_FILE:
+            desc_file = folder / PR_DESCRIPTION_FILE
+            if not desc_file.exists() or not desc_file.is_file():
+                print(f"    ⚠️ 未找到 {PR_DESCRIPTION_FILE}，跳过该文件夹")
+                print(f"    ⊙ 请在 {folder} 中创建 {PR_DESCRIPTION_FILE} 文件")
+                print()
+                continue
+
+            # PR 描述文件也要求非空（仅空白也视为无效）
+            try:
+                desc_content = desc_file.read_text(encoding="utf-8").strip()
+            except Exception as e:
+                print(f"    ⚠️ 读取 {PR_DESCRIPTION_FILE} 失败，跳过该文件夹")
+                print(f"    ⊙ 错误: {e}")
+                print()
+                continue
+            if not desc_content:
+                print(f"    ⚠️ {PR_DESCRIPTION_FILE} 内容为空，跳过该文件夹")
+                print(f"    ⊙ 请在 {desc_file} 中填写 PR 描述")
+                print()
+                continue
+
+        valid_folders.append(folder)
+
+    folders = valid_folders
     
     if not folders:
         raise SystemExit("No folders to push.")
@@ -501,7 +557,7 @@ def cmd_push(args):
                         # main 不在待推送列表中，报错
                         print(f"❌ 错误：远程 {args.main_name} 分支不存在")
                         print(f"⊙ 请先推送 {args.main_name} 文件夹作为基础分支：")
-                        print(f"   python Bugbash_workflow.py push-pr")
+                        print("   python Bugbash_workflow.py push-pr")
                         raise SystemExit(1)
                 else:
                     # 远程 main 存在，如果本地也有 main，检查是否需要更新
@@ -523,23 +579,6 @@ def cmd_push(args):
                 # main 文件夹不需要 final_prompt.txt
             else:
                 print(f"== Pushing folder '{branch}' as branch '{branch}' ==")
-                
-                # 检查是否存在与文件夹同名的txt文件
-                folder_txt_file = folder / f"{folder.name}.txt"
-                if not folder_txt_file.exists() or not folder_txt_file.is_file():
-                    print(f"    ⚠️ 未找到 {folder.name}.txt，跳过该文件夹")
-                    print(f"    ⊙ 请在 {folder} 中创建 {folder.name}.txt 文件")
-                    print()
-                    continue
-                
-                # 检查 PR 描述配置：如果配置了 PR_DESCRIPTION_FILE，必须找到该文件
-                if PR_DESCRIPTION_FILE:
-                    desc_file = folder / PR_DESCRIPTION_FILE
-                    if not desc_file.exists() or not desc_file.is_file():
-                        print(f"    ⚠️ 未找到 {PR_DESCRIPTION_FILE}，跳过该文件夹")
-                        print(f"    ⊙ 请在 {folder} 中创建 {PR_DESCRIPTION_FILE} 文件")
-                        print()
-                        continue
 
             # 检查远程分支是否存在
             remote_branch_exists = False
@@ -665,7 +704,7 @@ def cmd_push(args):
                 else:
                     # 没有 --force，提示用户
                     print(f"    ⚠️ 远程分支 {branch} 已存在且无法 fast-forward")
-                    print(f"    ⊙ 如需覆盖，请使用: python Bugbash_workflow.py push-pr --force")
+                    print("    ⊙ 如需覆盖，请使用: python Bugbash_workflow.py push-pr --force")
                     continue
 
             # 创建 Pull Request（main 文件夹不创建 PR）
