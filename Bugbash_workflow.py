@@ -4,6 +4,7 @@ Bugbash工作流脚本：创建文件夹、同步内容、推送分支并创建P
 使用方法：
   python Bugbash_workflow.py create           # 创建文件夹
   python Bugbash_workflow.py sync             # 同步main文件夹内容到其他文件夹，强制覆盖，不会清空文件夹。
+    python Bugbash_workflow.py collect-artifacts # 收集产物（生成各模型的 .txt 和 time.txt）
   python Bugbash_workflow.py push             # 推送文件夹为分支
   python Bugbash_workflow.py push-pr          # 推送文件夹为分支并创建PR（推荐，首次推送）
   python Bugbash_workflow.py push-pr --force  # 强制推送并创建PR（更新已存在的分支）
@@ -18,6 +19,33 @@ from pathlib import Path
 from dotenv import load_dotenv
 import time
 import pathspec
+from typing import Optional
+
+
+def run_collect_artifacts() -> None:
+    """运行 collect_artifacts.py
+
+    - 可单独运行：python Bugbash_workflow.py collect-artifacts
+    - push / push-pr 会自动先运行一次
+    """
+    try:
+        import collect_artifacts  # type: ignore
+    except Exception as e:
+        print("❌ 无法导入 collect_artifacts.py，请确认文件存在且无语法错误")
+        print(f"错误: {e}")
+        raise SystemExit(1)
+
+    try:
+        rc = collect_artifacts.main()
+    except SystemExit as e:
+        raise SystemExit(e.code)
+    except Exception as e:
+        print("❌ collect_artifacts 运行失败")
+        print(f"错误: {e}")
+        raise SystemExit(1)
+
+    if isinstance(rc, int) and rc != 0:
+        raise SystemExit(rc)
 
 # 加载 .env 文件
 load_dotenv(dotenv_path=Path.cwd() / '.env')
@@ -35,16 +63,19 @@ def get_required_env(key: str, error_msg: str = None) -> str:
         raise SystemExit(1)
     return value
 
-# GitHub 仓库配置
-DEFAULT_REPO_URL = get_required_env('DEFAULT_REPO_URL', "❌ 错误：未在 .env 文件中配置 DEFAULT_REPO_URL（GitHub仓库URL）")
-GITHUB_USERNAME = get_required_env('GITHUB_USERNAME', "❌ 错误：未在 .env 文件中配置 GITHUB_USERNAME（GitHub用户名）")
-GITHUB_TOKEN = get_required_env('GITHUB_TOKEN', "❌ 错误：未在 .env 文件中配置 GITHUB_TOKEN（GitHub访问令牌）")
+# 注意：为保证 `-h`、`create`、`sync`、`collect-artifacts` 在未配置 .env 时也可运行，
+# 这里不要在 import 阶段强制要求环境变量。需要强制校验的参数在对应命令执行时再校验。
 
-# 模板文件夹名称
-MAIN_FOLDER_NAME = get_required_env('MAIN_FOLDER_NAME', "❌ 错误：未在 .env 文件中配置 MAIN_FOLDER_NAME（模板文件夹名称）")
+# GitHub 仓库配置（push/push-pr 或创建 PR 时才强制要求）
+DEFAULT_REPO_URL = os.getenv('DEFAULT_REPO_URL')
+GITHUB_USERNAME = os.getenv('GITHUB_USERNAME')
+GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 
-# 要创建的自定义文件夹名称列表（也会作为分支名和PR标题）
-_custom_folders_str = get_required_env('CUSTOM_FOLDERS', "❌ 错误：未在 .env 文件中配置 CUSTOM_FOLDERS（自定义文件夹列表）")
+# 模板文件夹名称（默认 main）
+MAIN_FOLDER_NAME = os.getenv('MAIN_FOLDER_NAME', 'main')
+
+# 要创建的自定义文件夹名称列表（用逗号分隔）
+_custom_folders_str = os.getenv('CUSTOM_FOLDERS', '')
 CUSTOM_FOLDERS = [f.strip() for f in _custom_folders_str.split(',') if f.strip()]
 
 # 排除的文件/文件夹名称（可选，如果未配置则上传所有文件）
@@ -55,6 +86,22 @@ EXCLUDE_NAMES = {n.strip() for n in _exclude_names_str.split(',') if n.strip()} 
 PR_DESCRIPTION_FILE = os.getenv('PR_DESCRIPTION_FILE')  # PR描述文件名（可选）
 PR_DESCRIPTION = os.getenv('PR_DESCRIPTION')  # PR描述内容（可选）
 # ========================================
+
+
+def require_repo_url(repo_url: Optional[str]) -> str:
+    if repo_url:
+        return repo_url
+    return get_required_env('DEFAULT_REPO_URL', "❌ 错误：未在 .env 文件中配置 DEFAULT_REPO_URL（GitHub仓库URL）")
+
+
+def require_github_auth() -> tuple[str, str]:
+    username = GITHUB_USERNAME or os.getenv('GITHUB_USERNAME')
+    token = GITHUB_TOKEN or os.getenv('GITHUB_TOKEN')
+    if not username:
+        username = get_required_env('GITHUB_USERNAME', "❌ 错误：未在 .env 文件中配置 GITHUB_USERNAME（GitHub用户名）")
+    if not token:
+        token = get_required_env('GITHUB_TOKEN', "❌ 错误：未在 .env 文件中配置 GITHUB_TOKEN（GitHub访问令牌）")
+    return username, token
 
 
 # ========================================
@@ -429,6 +476,12 @@ def create_pull_request(repo_url: str, branch_name: str, pr_title: str,
 
 def cmd_push(args):
     """推送文件夹为分支命令"""
+    # 在 push 之前自动收集产物
+    run_collect_artifacts()
+
+    # repo-url 允许运行时从 .env 读取；未配置则报错
+    args.repo_url = require_repo_url(getattr(args, 'repo_url', None))
+
     root = Path.cwd()
 
     if args.folders:
@@ -650,6 +703,7 @@ def cmd_push(args):
                 print(f"    ⊙ 内容与远程一致，跳过推送: {branch}")
                 # 即使跳过推送，如果需要创建PR，仍然尝试创建
                 if args.create_pr and not is_main:
+                    github_username, github_token = require_github_auth()
                     pr_title = branch
                     pr_body = get_pr_description(folder)
                     time.sleep(1)
@@ -658,8 +712,8 @@ def cmd_push(args):
                         branch_name=branch,
                         pr_title=pr_title,
                         pr_body=pr_body,
-                        username=GITHUB_USERNAME,
-                        token=GITHUB_TOKEN
+                        username=github_username,
+                        token=github_token
                     )
                 continue
 
@@ -671,6 +725,7 @@ def cmd_push(args):
                 print(f"    ⊙ 内容与远程一致，跳过推送: {branch}")
                 # 即使跳过推送，如果需要创建PR，仍然尝试创建
                 if args.create_pr and not is_main:
+                    github_username, github_token = require_github_auth()
                     pr_title = branch
                     pr_body = get_pr_description(folder)
                     time.sleep(1)
@@ -679,8 +734,8 @@ def cmd_push(args):
                         branch_name=branch,
                         pr_title=pr_title,
                         pr_body=pr_body,
-                        username=GITHUB_USERNAME,
-                        token=GITHUB_TOKEN
+                        username=github_username,
+                        token=github_token
                     )
                 continue
 
@@ -709,6 +764,7 @@ def cmd_push(args):
 
             # 创建 Pull Request（main 文件夹不创建 PR）
             if args.create_pr and not is_main:
+                github_username, github_token = require_github_auth()
                 # 使用文件夹名作为 PR 标题
                 pr_title = branch
                 # 从 PR 描述文件读取 PR 描述
@@ -722,8 +778,8 @@ def cmd_push(args):
                     branch_name=branch,
                     pr_title=pr_title,
                     pr_body=pr_body,
-                    username=GITHUB_USERNAME,
-                    token=GITHUB_TOKEN
+                    username=github_username,
+                    token=github_token
                 )
 
 # ========================================
@@ -743,6 +799,22 @@ def cmd_push_pr(args):
     
     print("\n" + "="*60)
     print("推送和PR创建完成！")
+    print("="*60 + "\n")
+
+
+# ========================================
+# Collect-Artifacts 命令：收集产物
+# ========================================
+def cmd_collect_artifacts(args):
+    """收集产物（生成各模型的 .txt 和 time.txt）"""
+    print("\n" + "="*60)
+    print("收集产物")
+    print("="*60 + "\n")
+
+    run_collect_artifacts()
+
+    print("\n" + "="*60)
+    print("产物收集完成！")
     print("="*60 + "\n")
 
 
@@ -806,6 +878,13 @@ def main():
         help="试运行模式，打印将要复制的内容但不实际执行"
     )
     parser_sync.set_defaults(func=cmd_sync)
+
+    # Collect-Artifacts 子命令
+    parser_collect = subparsers.add_parser(
+        "collect-artifacts",
+        help="收集产物（生成各模型的 .txt 和 time.txt）"
+    )
+    parser_collect.set_defaults(func=cmd_collect_artifacts)
     
     # Push 子命令
     parser_push = subparsers.add_parser(
