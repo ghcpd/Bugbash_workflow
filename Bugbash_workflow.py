@@ -8,6 +8,8 @@ Bugbash工作流脚本：创建文件夹、同步内容、推送分支并创建P
   python Bugbash_workflow.py push             # 推送文件夹为分支
   python Bugbash_workflow.py push-pr          # 推送文件夹为分支并创建PR（推荐，首次推送）
   python Bugbash_workflow.py push-pr --force  # 强制推送并创建PR（更新已存在的分支）
+    python Bugbash_workflow.py push --collect-artifacts    # 推送前先收集产物（实验特性，默认关闭）
+    python Bugbash_workflow.py push-pr --collect-artifacts # 推送前先收集产物（实验特性，默认关闭）
 """
 import argparse
 import os
@@ -476,8 +478,9 @@ def create_pull_request(repo_url: str, branch_name: str, pr_title: str,
 
 def cmd_push(args):
     """推送文件夹为分支命令"""
-    # 在 push 之前自动收集产物
-    run_collect_artifacts()
+    # 实验特性：推送前可选收集产物（默认关闭）
+    if getattr(args, "collect_artifacts", False):
+        run_collect_artifacts()
 
     # repo-url 允许运行时从 .env 读取；未配置则报错
     args.repo_url = require_repo_url(getattr(args, 'repo_url', None))
@@ -917,6 +920,11 @@ def main():
         action="store_true",
         help="推送后自动创建Pull Request"
     )
+    parser_push.add_argument(
+        "--collect-artifacts",
+        action="store_true",
+        help="推送前先收集产物（实验特性，默认关闭）"
+    )
     parser_push.set_defaults(func=cmd_push)
     
     # Push-PR 子命令
@@ -944,6 +952,11 @@ def main():
         "--force",
         action="store_true",
         help="强制推送（覆盖远程分支）"
+    )
+    parser_push_pr.add_argument(
+        "--collect-artifacts",
+        action="store_true",
+        help="推送前先收集产物（实验特性，默认关闭）"
     )
     parser_push_pr.set_defaults(func=cmd_push_pr)
     
