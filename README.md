@@ -2,6 +2,12 @@
 
 ## 🔄 更新说明
 
+**2026-01-30：产物收集集成（实验特性）+ 推送前校验增强**
+- 新增 `collect-artifacts` 命令：生成各模型的 `<model>.txt` 与 `time.txt`
+- `push / push-pr` 默认不再自动收集产物；可用 `--collect-artifacts` 显式开启（实验特性）
+- 推送前校验增强：非 main 文件夹必须存在且**非空**的 `<文件夹名>.txt`；若配置了 `PR_DESCRIPTION_FILE`，也必须存在且**非空**
+- `.env` 不再在启动阶段强制要求；仅在需要推送/创建 PR 时才会校验必需项
+
 **2026-01-09：智能推送和分支管理优化**
 - **智能分支创建**：自动检测远程分支，已存在则基于远程分支创建，支持 fast-forward 推送
 - **内容比较优化**：commit 时自动检测是否有变化，无变化则跳过推送
@@ -64,22 +70,23 @@ python Bugbash_workflow.py sync
 python Bugbash_workflow.py sync --dry-run                    # 预览不执行
 python Bugbash_workflow.py sync --targets folder1 folder2    # 指定目标
 
+# 收集产物（生成各模型的 .txt 与 time.txt）
+python Bugbash_workflow.py collect-artifacts
+
 # 推送分支（不创建 PR）
 python Bugbash_workflow.py push
 python Bugbash_workflow.py push --force                      # 强制覆盖
+python Bugbash_workflow.py push --collect-artifacts           # 推送前先收集产物（实验特性，默认关闭）
 
 # 推送分支并创建 PR（推荐）
 python Bugbash_workflow.py push-pr
 python Bugbash_workflow.py push-pr --force                   # 强制覆盖所有分支
 python Bugbash_workflow.py push-pr --folders folder1         # 只推送指定文件夹
 python Bugbash_workflow.py push-pr --folders folder1 --force # 强制推送指定文件夹
+python Bugbash_workflow.py push-pr --collect-artifacts        # 推送前先收集产物（实验特性，默认关闭）
 ```
 
-# 推送分支并创建 PR（推荐）
-python Bugbash_workflow.py push-pr
-python Bugbash_workflow.py push-pr --force                   # 强制覆盖
-python Bugbash_workflow.py push-pr --folders folder1 folder2 # 指定文件夹
-```
+说明：`--collect-artifacts` 只是帮你在推送前自动运行一次 `collect-artifacts`；也可以提前单独运行。
 
 ---
 
@@ -135,8 +142,8 @@ python Bugbash_workflow.py push-pr
 - 基于远程 `main` 分支创建
 - Commit 信息：文件夹名
 - 可选创建 PR
-- **必需文件**：`<文件夹名>.txt`（例如 `grok-fast` 文件夹需要 `grok-fast.txt`）
-- **PR 描述**：根据 `.env` 配置自动处理 (e.g. final_prompt.txt)
+- **必需文件**：`<文件夹名>.txt`（例如 `grok-fast` 文件夹需要 `grok-fast.txt`），且内容不能为空（仅空白也算空）
+- **PR 描述**：根据 `.env` 配置自动处理 (e.g. final_prompt.txt)。若配置了 `PR_DESCRIPTION_FILE`，该文件也必须存在且内容不能为空
 
 ### PR 描述优先级
 1. **从文件读取**：如果配置了 `PR_DESCRIPTION_FILE`，从每个文件夹的该文件读取（文件必须存在）
@@ -152,9 +159,9 @@ python Bugbash_workflow.py push-pr
 
 ## 注意事项
 
-- ⚠️ 必需的 `.env` 配置项未设置会导致脚本退出
+- ⚠️ `push / push-pr` 仍需要 `.env` 里的 GitHub 配置；但 `-h`/`create`/`sync`/`collect-artifacts` 可以在未配置 GitHub 项时运行
 - ⚠️ 如果配置了 `PR_DESCRIPTION_FILE`，每个文件夹必须有该文件，否则会被跳过
-- ⚠️ 自定义文件夹缺少 `<文件夹名>.txt` 会被跳过
+- ⚠️ 自定义文件夹缺少 `<文件夹名>.txt` 或内容为空会被跳过
 - ⚠️ **使用 `--folders` 补推时，必须确保远程 main 分支已存在**
 - ⚠️ 无法 fast-forward 时需要使用 `--force` 覆盖（较少见）
 - ✅ 首次推送建议：完整推送（包含 main），之后可单独补推
