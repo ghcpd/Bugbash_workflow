@@ -545,7 +545,7 @@ def main() -> int:
 	model_dirs = [
 		d
 		for d in repo_root.iterdir()
-		if d.is_dir() and (d / "pyproject.toml").exists() and d.name != "main"
+		if d.is_dir() and d.name != "main"
 	]
 	logging.info("found_model_dirs=%d", len(model_dirs))
 	if logging.getLogger().isEnabledFor(logging.DEBUG):
