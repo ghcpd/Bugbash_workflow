@@ -87,6 +87,17 @@ def _split_csv(value: str) -> list[str]:
 	return [p.strip() for p in value.split(",") if p.strip()]
 
 
+def _parse_name_set(raw: str) -> set[str]:
+	"""Parse a case-insensitive list of names.
+
+	Accepts comma / semicolon / newline as separators.
+	"""
+	if not raw.strip():
+		return set()
+	items = re.split(r"[;,\n]", raw)
+	return {p.strip().lower() for p in items if p.strip()}
+
+
 def _workspace_uri_for_folder(folder: Path) -> str:
 	"""Match VS Code workspace.json folder format: file:///c%3A/..."""
 
@@ -560,11 +571,18 @@ def main() -> int:
 	if not appdata:
 		raise SystemExit("APPDATA is not set; set it or provide it in .env")
 	appdata_path = Path(appdata)
-	variants = _split_csv(os.environ.get("VSCODE_VARIANTS", "Code,Code - Insiders"))
-	storage_roots = [appdata_path / v / "User" / "workspaceStorage" for v in variants]
-	logging.info("vscode_variants=%s", ",".join(variants) if variants else "")
-	for sr in storage_roots:
-		logging.debug("workspaceStorage_root=%s exists=%s", _fmt_path(sr), sr.exists())
+	# VS Code workspaceStorage selection
+	# New behavior:
+	# - CODE_INSIDERS=model1,model2 -> those model folders are treated as opened with Code - Insiders
+	# - otherwise, use VSCODE_VARIANT_DEFAULT (defaults to Code)
+
+	default_variant = (os.environ.get("VSCODE_VARIANT_DEFAULT") or "Code").strip()
+	code_insiders_models = _parse_name_set(os.environ.get("CODE_INSIDERS", ""))
+
+	logging.info("vscode_variant_default=%s", default_variant)
+	logging.info("code_insiders_models=%d", len(code_insiders_models))
+	if logging.getLogger().isEnabledFor(logging.DEBUG) and code_insiders_models:
+		logging.debug("code_insiders_list=%s", ",".join(sorted(code_insiders_models)))
 
 	timings: dict[str, SessionTiming] = {}
 	wrote_transcripts = 0
@@ -575,6 +593,9 @@ def main() -> int:
 	for model_dir in sorted(model_dirs, key=lambda p: p.name.lower()):
 		model_name = model_dir.name
 		logging.info("processing_model=%s", model_name)
+		use_insiders = model_name.lower() in code_insiders_models
+		model_variant = "Code - Insiders" if use_insiders else default_variant
+		logging.info("model_variant=%s (insiders=%s)", model_variant, use_insiders)
 
 		# Task 3
 		final_prompt_dst = model_dir / prompt_filename
@@ -584,11 +605,9 @@ def main() -> int:
 
 		workspace_uri = _workspace_uri_for_folder(model_dir)
 		ws_dir: Optional[Path] = None
-		for storage_root in storage_roots:
-			candidate = find_workspace_storage_dir(storage_root, workspace_uri)
-			if candidate:
-				ws_dir = candidate
-				break
+		storage_root = appdata_path / model_variant / "User" / "workspaceStorage"
+		logging.debug("workspaceStorage_root=%s exists=%s", _fmt_path(storage_root), storage_root.exists())
+		ws_dir = find_workspace_storage_dir(storage_root, workspace_uri)
 		if ws_dir:
 			ws_found += 1
 			logging.debug("workspaceStorage_match=%s", _fmt_path(ws_dir))
@@ -604,10 +623,25 @@ def main() -> int:
 		timing: Optional[SessionTiming] = None
 
 		if ws_dir:
-			transcript = export_transcript(ws_dir / "chatSessions")
+			chat_sessions_dir = ws_dir / "chatSessions"
+			if logging.getLogger().isEnabledFor(logging.DEBUG):
+				try:
+					session_files = [
+						*chat_sessions_dir.glob("*.json"),
+						*chat_sessions_dir.glob("*.jsonl"),
+					]
+				except Exception:
+					session_files = []
+				logging.debug(
+					"chatSessions_dir=%s exists=%s files=%d",
+					_fmt_path(chat_sessions_dir),
+					chat_sessions_dir.exists(),
+					len(session_files),
+				)
+			transcript = export_transcript(chat_sessions_dir)
 			if transcript:
 				transcript = _relativize_text(transcript, model_root=model_dir, repo_root=repo_root)
-			timing = extract_message_window_timing(ws_dir / "chatSessions")
+			timing = extract_message_window_timing(chat_sessions_dir)
 			if timing is None:
 				# Fallback: VS Code session index timing (can include idle gaps)
 				timing = extract_session_timing(ws_dir / "state.vscdb")
@@ -622,6 +656,13 @@ def main() -> int:
 			model_txt.touch(exist_ok=True)
 			touched_empty += 1
 			logging.warning("empty_transcript_touched=%s", _fmt_path(model_txt))
+			if ws_dir:
+				logging.warning(
+					"empty_transcript_reason: no extractable messages in workspaceStorage=%s",
+					_fmt_path(ws_dir),
+				)
+			else:
+				logging.warning("empty_transcript_reason: no workspaceStorage match")
 
 		if timing:
 			timings[model_name] = timing
