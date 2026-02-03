@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -9,6 +10,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote, unquote
+
+
+def _configure_logging() -> None:
+	"""Configure minimal logging.
+
+	Enable debug logs by setting COLLECT_ARTIFACTS_LOG=DEBUG (or INFO/WARNING/etc).
+	"""
+	level_name = (os.environ.get("COLLECT_ARTIFACTS_LOG") or "INFO").strip().upper()
+	level = getattr(logging, level_name, logging.INFO)
+	logging.basicConfig(level=level, format="[collect_artifacts] %(levelname)s: %(message)s")
+
+
+def _fmt_path(p: Path) -> str:
+	# Keep log output stable across machines.
+	return str(p.resolve()).replace("\\", "/")
 
 
 @dataclass(frozen=True)
@@ -69,6 +85,17 @@ def _apply_dotenv(dotenv: dict[str, str]) -> None:
 
 def _split_csv(value: str) -> list[str]:
 	return [p.strip() for p in value.split(",") if p.strip()]
+
+
+def _parse_name_set(raw: str) -> set[str]:
+	"""Parse a case-insensitive list of names.
+
+	Accepts comma / semicolon / newline as separators.
+	"""
+	if not raw.strip():
+		return set()
+	items = re.split(r"[;,\n]", raw)
+	return {p.strip().lower() for p in items if p.strip()}
 
 
 def _workspace_uri_for_folder(folder: Path) -> str:
@@ -513,56 +540,108 @@ def export_transcript(chat_sessions_dir: Path) -> Optional[str]:
 
 
 def main() -> int:
+	_configure_logging()
+
 	repo_root = _find_repo_root(Path.cwd())
+	logging.info("cwd=%s", _fmt_path(Path.cwd()))
+	logging.info("repo_root=%s", _fmt_path(repo_root))
 
 	_apply_dotenv(_load_dotenv(repo_root / ".env"))
 
 	# Optional: copy PR description/prompt file into each model folder if missing.
 	# File name is configured via .env: PR_DESCRIPTION_FILE (defaults to final_prompt.txt).
 	prompt_filename = os.environ.get("PR_DESCRIPTION_FILE") or "final_prompt.txt"
+	logging.info("prompt_filename=%s", prompt_filename)
 
 	model_dirs = [
 		d
 		for d in repo_root.iterdir()
-		if d.is_dir() and (d / "pyproject.toml").exists() and d.name != "main"
+		if d.is_dir() and d.name != "main"
 	]
+	logging.info("found_model_dirs=%d", len(model_dirs))
+	if logging.getLogger().isEnabledFor(logging.DEBUG):
+		for d in sorted(model_dirs, key=lambda p: p.name.lower()):
+			logging.debug("model_dir=%s", _fmt_path(d))
 
 	final_prompt_src = repo_root / prompt_filename
 	has_final_prompt_src = final_prompt_src.exists() and final_prompt_src.is_file()
+	logging.info("final_prompt_src=%s exists=%s", _fmt_path(final_prompt_src), has_final_prompt_src)
 
 	appdata = os.environ.get("APPDATA")
 	if not appdata:
 		raise SystemExit("APPDATA is not set; set it or provide it in .env")
 	appdata_path = Path(appdata)
-	variants = _split_csv(os.environ.get("VSCODE_VARIANTS", "Code,Code - Insiders"))
-	storage_roots = [appdata_path / v / "User" / "workspaceStorage" for v in variants]
+	# VS Code workspaceStorage selection
+	# New behavior:
+	# - CODE_INSIDERS=model1,model2 -> those model folders are treated as opened with Code - Insiders
+	# - otherwise, use VSCODE_VARIANT_DEFAULT (defaults to Code)
+
+	default_variant = (os.environ.get("VSCODE_VARIANT_DEFAULT") or "Code").strip()
+	code_insiders_models = _parse_name_set(os.environ.get("CODE_INSIDERS", ""))
+
+	logging.info("vscode_variant_default=%s", default_variant)
+	logging.info("code_insiders_models=%d", len(code_insiders_models))
+	if logging.getLogger().isEnabledFor(logging.DEBUG) and code_insiders_models:
+		logging.debug("code_insiders_list=%s", ",".join(sorted(code_insiders_models)))
 
 	timings: dict[str, SessionTiming] = {}
+	wrote_transcripts = 0
+	touched_empty = 0
+	ws_found = 0
+	ws_missing = 0
 
 	for model_dir in sorted(model_dirs, key=lambda p: p.name.lower()):
 		model_name = model_dir.name
+		logging.info("processing_model=%s", model_name)
+		use_insiders = model_name.lower() in code_insiders_models
+		model_variant = "Code - Insiders" if use_insiders else default_variant
+		logging.info("model_variant=%s (insiders=%s)", model_variant, use_insiders)
 
 		# Task 3
 		final_prompt_dst = model_dir / prompt_filename
 		if has_final_prompt_src and not final_prompt_dst.exists():
 			final_prompt_dst.write_text(final_prompt_src.read_text(encoding="utf-8"), encoding="utf-8")
+			logging.debug("copied_prompt_to=%s", _fmt_path(final_prompt_dst))
 
 		workspace_uri = _workspace_uri_for_folder(model_dir)
 		ws_dir: Optional[Path] = None
-		for storage_root in storage_roots:
-			candidate = find_workspace_storage_dir(storage_root, workspace_uri)
-			if candidate:
-				ws_dir = candidate
-				break
+		storage_root = appdata_path / model_variant / "User" / "workspaceStorage"
+		logging.debug("workspaceStorage_root=%s exists=%s", _fmt_path(storage_root), storage_root.exists())
+		ws_dir = find_workspace_storage_dir(storage_root, workspace_uri)
+		if ws_dir:
+			ws_found += 1
+			logging.debug("workspaceStorage_match=%s", _fmt_path(ws_dir))
+		else:
+			ws_missing += 1
+			logging.warning(
+				"no_workspaceStorage_match for model=%s (uri=%s)",
+				model_name,
+				workspace_uri,
+			)
 
 		transcript: Optional[str] = None
 		timing: Optional[SessionTiming] = None
 
 		if ws_dir:
-			transcript = export_transcript(ws_dir / "chatSessions")
+			chat_sessions_dir = ws_dir / "chatSessions"
+			if logging.getLogger().isEnabledFor(logging.DEBUG):
+				try:
+					session_files = [
+						*chat_sessions_dir.glob("*.json"),
+						*chat_sessions_dir.glob("*.jsonl"),
+					]
+				except Exception:
+					session_files = []
+				logging.debug(
+					"chatSessions_dir=%s exists=%s files=%d",
+					_fmt_path(chat_sessions_dir),
+					chat_sessions_dir.exists(),
+					len(session_files),
+				)
+			transcript = export_transcript(chat_sessions_dir)
 			if transcript:
 				transcript = _relativize_text(transcript, model_root=model_dir, repo_root=repo_root)
-			timing = extract_message_window_timing(ws_dir / "chatSessions")
+			timing = extract_message_window_timing(chat_sessions_dir)
 			if timing is None:
 				# Fallback: VS Code session index timing (can include idle gaps)
 				timing = extract_session_timing(ws_dir / "state.vscdb")
@@ -571,8 +650,19 @@ def main() -> int:
 		model_txt = model_dir / f"{model_name}.txt"
 		if transcript:
 			model_txt.write_text(transcript, encoding="utf-8")
+			wrote_transcripts += 1
+			logging.info("wrote_transcript=%s bytes=%d", _fmt_path(model_txt), len(transcript.encode("utf-8")))
 		else:
 			model_txt.touch(exist_ok=True)
+			touched_empty += 1
+			logging.warning("empty_transcript_touched=%s", _fmt_path(model_txt))
+			if ws_dir:
+				logging.warning(
+					"empty_transcript_reason: no extractable messages in workspaceStorage=%s",
+					_fmt_path(ws_dir),
+				)
+			else:
+				logging.warning("empty_transcript_reason: no workspaceStorage match")
 
 		if timing:
 			timings[model_name] = timing
@@ -583,6 +673,15 @@ def main() -> int:
 		t = timings[model_name]
 		time_lines.append(f"{model_name}:{t.start_iso9075()},{t.end_iso9075()}")
 	(repo_root / "time.txt").write_text("\n".join(time_lines) + ("\n" if time_lines else ""), encoding="utf-8")
+	logging.info(
+		"wrote_time=%s lines=%d (ws_found=%d ws_missing=%d transcripts=%d empty=%d)",
+		_fmt_path(repo_root / "time.txt"),
+		len(time_lines),
+		ws_found,
+		ws_missing,
+		wrote_transcripts,
+		touched_empty,
+	)
 
 	return 0
 
